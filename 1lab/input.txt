@@ -1,0 +1,15 @@
+do until (x1 + y2) <= 10 and z > 3 or k <> 5
+    input << a1;
+    b = x1 + y2 * (z - 2);
+    output << b;
+    c = (a1 + b) / 2;
+loop
+
+
+
+
+
+
+do until a > 10#;
+    b = 5 ^ 2;
+loop;
