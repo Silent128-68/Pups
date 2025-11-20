@@ -2,10 +2,6 @@ import re
 import sys
 from typing import List, Dict, NamedTuple
 
-# ==========================================
-# ЧАСТЬ 1: ЛЕКСИЧЕСКИЙ АНАЛИЗАТОР (ИЗ ЛР 1)
-# ==========================================
-
 class Lexeme(NamedTuple):
     value: str
     type: str
@@ -73,10 +69,6 @@ def lex(line_text: str, line_num: int, id_table: Dict[str, int], const_table: Di
             raise ValueError(f"Строка {line_num}, поз. {col}: Недопустимый символ: {val!r}")
 
     return lexemes
-
-# ==========================================
-# ЧАСТЬ 2: СИНТАКСИЧЕСКИЙ АНАЛИЗАТОР
-# ==========================================
 
 class TreeNode:
     def __init__(self, name: str, value: str = ""):
@@ -210,7 +202,7 @@ def main():
         with open("FL_1lab_input.txt", "r", encoding="utf-8") as f: text = f.read()
     except FileNotFoundError:
         text = "do until (x + y) < 10\n  input << a;\n  b = a * 2;\n  output << b;\nloop"
-        print("⚠️ Файл не найден, используется тест.")
+        print("Файл не найден, используется тест.")
 
     print(f"Код:\n{text}\n" + "-"*50)
     all_lexemes = []
@@ -222,9 +214,9 @@ def main():
         
         parser = RecursiveDescentParser(all_lexemes)
         print(parser.parse_program())
-        print("\n✅ Анализ завершен.")
+        print("\nАнализ завершен.")
     except Exception as e:
-        print(f"\n❌ Ошибка: {e}")
+        print(f"\nОшибка: {e}")
 
 if __name__ == "__main__":
     main()
