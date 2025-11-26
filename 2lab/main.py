@@ -1,6 +1,6 @@
 import re
 import sys
-from typing import List, Dict, NamedTuple
+from typing import List, Dict, NamedTuple, Optional
 
 class Lexeme(NamedTuple):
     value: str
@@ -24,11 +24,8 @@ TOKEN_SPECS = [
 
 token_regex = re.compile('|'.join('(?P<%s>%s)' % pair for pair in TOKEN_SPECS))
 
-def lex(line_text: str, line_num: int, id_table: Dict[str, int], const_table: Dict[str, int]) -> List[Lexeme]:
+def lex(line_text: str, line_num: int, id_table: Dict, const_table: Dict) -> List[Lexeme]:
     lexemes = []
-    next_id = len(id_table) + 1
-    next_const = len(const_table) + 1
-
     for mo in token_regex.finditer(line_text):
         kind = mo.lastgroup
         val = mo.group(0)
@@ -38,36 +35,25 @@ def lex(line_text: str, line_num: int, id_table: Dict[str, int], const_table: Di
             if val[0].isdigit():
                 if val.isdigit():
                     lexemes.append(Lexeme(val, 'CONSTANT', 'constant', line_num, col))
-                    if val not in const_table:
-                        const_table[val] = next_const
-                        next_const += 1
                 else:
-                    raise ValueError(f"Строка {line_num}, поз. {col}: Недопустимый идентификатор: '{val}'")
-            elif val[0].isalpha():
+                    raise ValueError(f"Lexer Error [{line_num}:{col}]: Invalid ID '{val}'")
+            else:
                 low = val.lower()
                 if low in KEYWORDS:
                     lexemes.append(Lexeme(val, KEYWORDS[low], 'keyword', line_num, col))
                 else:
                     lexemes.append(Lexeme(val, 'IDENTIFIER', 'identifier', line_num, col))
-                    if low not in id_table:
-                        id_table[low] = next_id
-                        next_id += 1
-        
         elif kind == 'OP':
-            op_type, op_cat = 'UNKNOWN_OP', 'operation'
-            if val == ';': op_type, op_cat = 'SEMICOLON', 'symbol'
-            elif val in ('+', '-', '*', '/'): op_type, op_cat = 'ARITHMETIC', 'operation'
-            elif val in ('<=', '>=', '==', '<>', '<', '>'): op_type, op_cat = 'COMPARISON', 'operation'
-            elif val == '=': op_type, op_cat = 'ASSIGNMENT', 'operation'
-            elif val == '<<': op_type, op_cat = 'IO_OP', 'operation'
-            elif val in ('(', ')'): op_type, op_cat = 'PAREN', 'symbol'
-            
-            lexemes.append(Lexeme(val, op_type, op_cat, line_num, col))
-            
+            op_type = 'UNKNOWN'
+            if val == ';': op_type = 'SEMICOLON'
+            elif val in ('+', '-', '*', '/'): op_type = 'ARITHMETIC'
+            elif val in ('<=', '>=', '==', '<>', '<', '>'): op_type = 'COMPARISON'
+            elif val == '=': op_type = 'ASSIGNMENT'
+            elif val == '<<': op_type = 'IO_OP'
+            elif val in ('(', ')'): op_type = 'PAREN'
+            lexemes.append(Lexeme(val, op_type, 'op', line_num, col))
         elif kind == 'SKIP': continue
-        elif kind == 'MISMATCH':
-            raise ValueError(f"Строка {line_num}, поз. {col}: Недопустимый символ: {val!r}")
-
+        elif kind == 'MISMATCH': raise ValueError(f"Lexer Error: '{val}'")
     return lexemes
 
 class TreeNode:
@@ -77,8 +63,7 @@ class TreeNode:
         self.children = []
 
     def add(self, node):
-        if isinstance(node, TreeNode): self.children.append(node)
-        elif node is not None: self.children.append(TreeNode(str(node)))
+        if node: self.children.append(node)
 
     def __repr__(self, level=0):
         ret = "  " * level + f"{self.name}" + (f": {self.value}" if self.value else "") + "\n"
@@ -97,126 +82,167 @@ class RecursiveDescentParser:
         else: self.curr = Lexeme("EOF", "EOF", "eof", -1, -1)
 
     def error(self, msg):
-        raise SyntaxError(f"Ошибка синтаксиса [стр {self.curr.line}, поз {self.curr.col}]: {msg}. Найдено: '{self.curr.value}'")
+        raise SyntaxError(f"Syntax Error [{self.curr.line}:{self.curr.col}]: {msg}. Found: '{self.curr.value}'")
 
-    def eat(self, expected_type: str, expected_value: str = None):
+    def eat(self, expected_type: str, val: str = None):
         if self.curr.type == expected_type:
-            if expected_value and self.curr.value.lower() != expected_value.lower():
-                 self.error(f"Ожидалось '{expected_value}'")
-            val = self.curr.value
+            if val and self.curr.value.lower() != val:
+                self.error(f"Expected '{val}'")
+            res = self.curr.value
             self.advance()
-            return val
-        else:
-            self.error(f"Ожидался тип '{expected_type}'")
+            return res
+        self.error(f"Expected type {expected_type}")
 
     # <Program> -> do until <LogExpr> <Statements> loop
-    def parse_program(self) -> TreeNode:
+    def parse_program(self):
         node = TreeNode("Program")
         node.add(TreeNode("Keyword", self.eat('DO')))
         node.add(TreeNode("Keyword", self.eat('UNTIL')))
-        node.add(self.parse_log_expr())    # Условие
-        node.add(self.parse_statements())  # Тело цикла
+        node.add(self.parse_log_expr())
+        node.add(self.parse_statements())
         node.add(TreeNode("Keyword", self.eat('LOOP')))
-        if self.curr.type != 'EOF': self.error("Обнаружен лишний код после конца программы")
+        if self.curr.type != 'EOF': self.error("Unexpected tokens after end")
         return node
 
-    # <Statements> -> <Statement> { <Statement> }
-    def parse_statements(self) -> TreeNode:
+    # <Statements> -> <Statement> <Statements> | epsilon
+    def parse_statements(self):
+        if self.curr.type == 'LOOP' or self.curr.type == 'EOF':
+            return None 
+        
         node = TreeNode("Statements")
-        while self.curr.type not in ('LOOP', 'EOF'):
-            node.add(self.parse_statement())
+        node.add(self.parse_statement())
+        
+        if self.curr.type in ('INPUT', 'OUTPUT', 'IDENTIFIER'):
+             node.add(self.parse_statements())
+             
         return node
 
-    # <Statement> -> Input | Output | Assignment
-    def parse_statement(self) -> TreeNode:
+    def parse_statement(self):
         if self.curr.type == 'INPUT':
-            n = TreeNode("InputStatement"); self.eat('INPUT'); self.eat('IO_OP')
-            n.add(TreeNode("Identifier", self.eat('IDENTIFIER'))); self.eat('SEMICOLON')
+            n = TreeNode("Input"); self.eat('INPUT'); self.eat('IO_OP')
+            n.add(TreeNode("Var", self.eat('IDENTIFIER'))); self.eat('SEMICOLON')
             return n
         elif self.curr.type == 'OUTPUT':
-            n = TreeNode("OutputStatement"); self.eat('OUTPUT'); self.eat('IO_OP')
+            n = TreeNode("Output"); self.eat('OUTPUT'); self.eat('IO_OP')
             n.add(self.parse_arith_expr()); self.eat('SEMICOLON')
             return n
         elif self.curr.type == 'IDENTIFIER':
-            n = TreeNode("Assignment"); n.add(TreeNode("Target", self.eat('IDENTIFIER')))
+            n = TreeNode("Assign"); n.add(TreeNode("Var", self.eat('IDENTIFIER')))
             self.eat('ASSIGNMENT'); n.add(self.parse_arith_expr()); self.eat('SEMICOLON')
             return n
-        self.error("Ожидался оператор (input, output или присваивание)")
+        self.error("Expected Statement")
 
-    # <LogExpr>
-    def parse_log_expr(self) -> TreeNode:
-        node = self.parse_log_term()
-        while self.curr.type == 'LOGICAL_OP' and self.curr.value.lower() == 'or':
+    def parse_arith_expr(self):
+        left = self.parse_term()
+        return self.parse_arith_expr_tail(left)
+
+    def parse_arith_expr_tail(self, left_node):
+        if self.curr.type == 'ARITHMETIC' and self.curr.value in ('+', '-'):
+            op_val = self.eat('ARITHMETIC')
+            op_node = TreeNode("Op", op_val)
+            
+            op_node.add(left_node)
+            
+            right = self.parse_term()
+            op_node.add(right)
+            
+            return self.parse_arith_expr_tail(op_node)
+        
+        return left_node
+
+    def parse_term(self):
+        left = self.parse_factor()
+        return self.parse_term_tail(left)
+
+    def parse_term_tail(self, left_node):
+        if self.curr.type == 'ARITHMETIC' and self.curr.value in ('*', '/'):
+            op_val = self.eat('ARITHMETIC')
+            op_node = TreeNode("Op", op_val)
+            op_node.add(left_node)
+            right = self.parse_factor()
+            op_node.add(right)
+            return self.parse_term_tail(op_node)
+        return left_node
+
+    def parse_factor(self):
+        if self.curr.type == 'IDENTIFIER': return TreeNode("Var", self.eat('IDENTIFIER'))
+        if self.curr.type == 'CONSTANT': return TreeNode("Const", self.eat('CONSTANT'))
+        if self.curr.value == '(': 
+            self.eat('PAREN')
+            n = self.parse_arith_expr() 
+            self.eat('PAREN')
+            return n
+        self.error("Invalid Factor")
+
+    def parse_log_expr(self):
+        left = self.parse_log_term()
+        return self.parse_log_expr_tail(left)
+
+    def parse_log_expr_tail(self, left_node):
+        if self.curr.type == 'LOGICAL_OP' and self.curr.value == 'or':
             op_val = self.eat('LOGICAL_OP')
-            new_node = TreeNode("LogicalOr"); new_node.add(node); new_node.add(self.parse_log_term())
-            node = new_node
-        return node
+            op_node = TreeNode("Logic", op_val)
+            op_node.add(left_node)
+            right = self.parse_log_term()
+            op_node.add(right)
+            return self.parse_log_expr_tail(op_node)
+        return left_node
 
-    def parse_log_term(self) -> TreeNode:
-        node = self.parse_log_factor()
-        while self.curr.type == 'LOGICAL_OP' and self.curr.value.lower() == 'and':
+    def parse_log_term(self):
+        left = self.parse_log_factor()
+        return self.parse_log_term_tail(left)
+        
+    def parse_log_term_tail(self, left_node):
+        if self.curr.type == 'LOGICAL_OP' and self.curr.value == 'and':
             op_val = self.eat('LOGICAL_OP')
-            new_node = TreeNode("LogicalAnd"); new_node.add(node); new_node.add(self.parse_log_factor())
-            node = new_node
-        return node
+            op_node = TreeNode("Logic", op_val)
+            op_node.add(left_node)
+            right = self.parse_log_factor()
+            op_node.add(right)
+            return self.parse_log_term_tail(op_node)
+        return left_node
 
-    def parse_log_factor(self) -> TreeNode:
+    def parse_log_factor(self):
         if self.curr.type == 'LOGICAL_NOT':
-            n = TreeNode("LogicalNot"); self.eat('LOGICAL_NOT'); n.add(self.parse_log_factor()); return n
+            n = TreeNode("Not", self.eat('LOGICAL_NOT'))
+            n.add(self.parse_log_factor())
+            return n
         return self.parse_comparison()
 
-    def parse_comparison(self) -> TreeNode:
+    def parse_comparison(self):
         left = self.parse_arith_expr()
         if self.curr.type == 'COMPARISON':
-            op = self.eat('COMPARISON')
-            node = TreeNode("Comparison", op); node.add(left); node.add(self.parse_arith_expr())
-            return node
+            op_val = self.eat('COMPARISON')
+            op_node = TreeNode("Cmp", op_val)
+            op_node.add(left)
+            op_node.add(self.parse_arith_expr())
+            return op_node
         return left
 
-    # <ArithExpr>
-    def parse_arith_expr(self) -> TreeNode:
-        node = self.parse_term()
-        while self.curr.type == 'ARITHMETIC' and self.curr.value in ('+', '-'):
-            op = self.eat('ARITHMETIC')
-            new_node = TreeNode("ArithOp", op); new_node.add(node); new_node.add(self.parse_term())
-            node = new_node
-        return node
-
-    def parse_term(self) -> TreeNode:
-        node = self.parse_factor()
-        while self.curr.type == 'ARITHMETIC' and self.curr.value in ('*', '/'):
-            op = self.eat('ARITHMETIC')
-            new_node = TreeNode("ArithOp", op); new_node.add(node); new_node.add(self.parse_factor())
-            node = new_node
-        return node
-
-    def parse_factor(self) -> TreeNode:
-        if self.curr.type == 'IDENTIFIER': return TreeNode("Var", self.eat('IDENTIFIER'))
-        elif self.curr.type == 'CONSTANT': return TreeNode("Const", self.eat('CONSTANT'))
-        elif self.curr.type == 'PAREN' and self.curr.value == '(':
-            self.eat('PAREN', '('); n = self.parse_arith_expr(); self.eat('PAREN', ')'); return n
-        self.error("Ожидался идентификатор, число или '('")
-
 def main():
+    filename = "FL_1lab_input.txt"
     try:
-        with open("FL_1lab_input.txt", "r", encoding="utf-8") as f: text = f.read()
+        with open(filename, "r", encoding="utf-8") as f:
+            text = f.read()
     except FileNotFoundError:
-        text = "do until (x + y) < 10\n  input << a;\n  b = a * 2;\n  output << b;\nloop"
-        print("Файл не найден, используется тест.")
+        print("Файл не найден. Использую тест.")
+        text = "do until x > 10\n x = x + 1; \nloop"
 
-    print(f"Код:\n{text}\n" + "-"*50)
-    all_lexemes = []
-    id_table, const_table = {}, {}
-
+    print(f"Код:\n{text}\n" + "-"*40)
+    
+    tokens = []
     try:
         for i, line in enumerate(text.splitlines(), 1):
-            all_lexemes.extend(lex(line, i, id_table, const_table))
+            tokens.extend(lex(line, i, {}, {}))
         
-        parser = RecursiveDescentParser(all_lexemes)
-        print(parser.parse_program())
-        print("\nАнализ завершен.")
+        parser = RecursiveDescentParser(tokens)
+        tree = parser.parse_program()
+        print("Дерево разбора:")
+        print(tree)
+        print("Анализ успешен (использована только рекурсия!)")
+            
     except Exception as e:
-        print(f"\nОшибка: {e}")
+        print(f"Ошибка: {e}")
 
 if __name__ == "__main__":
     main()
